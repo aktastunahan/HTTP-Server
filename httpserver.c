@@ -32,6 +32,194 @@ char* server_proxy_hostname;
 int server_proxy_port;
 
 /*
+ * Proxy mode helper data structure for threads
+ */
+typedef struct TwoWaySocs {
+  int listen_soc;
+  int send_soc;
+  char* dest_host;
+} TwoWaySocs;
+
+/*
+ * Thread server 
+ */
+typedef struct ServeInfo {
+  int client_fd;
+  void (*request_handler)(int);
+  //void (*request_handler)(int) = (void (*)(int))void_request_handler;
+} ServeInfo;
+
+/*****************************************/
+/**** Thread Functions ****/
+/****************************************/
+
+/*
+ * In proxy mode, listen the client socket,
+ * create http request for proxy server and 
+ * write it to the requested proxy server's socket.
+ */
+
+void *request_proxy_thread(void *sockets_ptr) {
+  TwoWaySocs *sockets = (TwoWaySocs*) sockets_ptr;
+  int src_fd = sockets->listen_soc;
+  int dest_fd = sockets->send_soc;
+  char* dest_host = sockets->dest_host;
+    
+  int buff_len = 1 << 13;
+  char *coming_buff = (char*) malloc(sizeof(char) * buff_len);
+  char *going_buff = (char*) malloc(sizeof(char) * buff_len);
+  char *going_buff_ptr = going_buff;
+  if(coming_buff == NULL) {
+    fprintf(stderr, "Malloc failed.%d: %s\n", errno, strerror(errno));
+    close(src_fd);
+    close(dest_fd);
+    exit(errno);
+  }
+  if(going_buff == NULL) {
+    fprintf(stderr, "Malloc failed.%d: %s\n", errno, strerror(errno));
+    free(coming_buff);
+    close(src_fd);
+    close(dest_fd);
+    exit(errno);
+  }
+  while(1){
+    int read_bytes = recv(src_fd, coming_buff, buff_len, 0);
+    if(read_bytes > 0 && read_bytes < buff_len)
+    {
+      char *host_start = NULL;
+      if((host_start = strstr(coming_buff, "Host: ")) == NULL) {
+        free(coming_buff);
+        free(going_buff);
+        close(src_fd);
+        close(dest_fd);
+        fprintf(stderr, "'Host' could not found in HTTP..%d %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+      char *host_end = NULL;
+      int snprint_num = -1;
+      if((host_end = strstr(host_start, "\n")) == NULL) {
+        free(coming_buff);
+        free(going_buff);
+        close(src_fd);
+        close(dest_fd);
+        fprintf(stderr, "Host field cannot found in http message. 1024 bytes buffer length might not be enough to hold field line.%d: %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+      
+      snprint_num = snprintf(going_buff_ptr, (host_start - coming_buff + 1), "%s", coming_buff);
+      if(snprint_num  == -1) {
+        free(coming_buff);
+        free(going_buff);
+        close(src_fd);
+        close(dest_fd);
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+      
+      going_buff_ptr += (host_start - coming_buff);
+      snprint_num = snprintf(going_buff_ptr, strlen(dest_host) + 9, "Host: %s\r\n", dest_host);
+      if(snprint_num  == -1) {
+        free(coming_buff);
+        free(going_buff);
+        close(src_fd);
+        close(dest_fd);
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+      
+      going_buff_ptr += snprint_num;
+      snprint_num = snprintf(going_buff_ptr, read_bytes - (host_end - host_start + 1), "%s", host_end + 1);
+      if(snprint_num  == -1) {
+        free(coming_buff);
+        free(going_buff);
+        close(src_fd);
+        close(dest_fd);
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+      if(send(dest_fd, going_buff, strlen(going_buff), 0)  == -1) {
+        free(coming_buff);
+        free(going_buff);
+        close(src_fd);
+        close(dest_fd);
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed error %d: %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+    }
+    else if(read_bytes == buff_len) {
+      free(coming_buff);
+      free(going_buff);
+      close(src_fd);
+      close(dest_fd);
+      fprintf(stderr, "Buffer overflow reading HTTP request from client. %d: %s\n", errno, strerror(errno));
+      exit(errno);
+    }
+    else {
+      free(coming_buff);
+      free(going_buff);
+      close(src_fd);
+      close(dest_fd);
+      if(errno == 104){
+        fprintf(stderr, "Connection closed by the pair.\n");
+        break;
+      }
+      else {
+        fprintf(stderr, "Read from requested file failed error: %d: %s\n", errno, strerror(errno));
+        exit(errno);
+      }
+    }
+  }
+}
+
+/*
+ * In proxy mode, listen the response coming from proxy server
+ * and write it to the requesting client.
+ */
+void *response_proxy_thread(void *sockets_ptr){
+  TwoWaySocs *sockets = (TwoWaySocs*) sockets_ptr;
+  
+  char buffer[1 << 17];
+  int recv_bytes = -1;
+  while(1) {
+    recv_bytes = recv(sockets->listen_soc, buffer, sizeof(buffer), 0);
+    if(recv_bytes == -1) {
+        close(sockets->listen_soc);
+        close(sockets->send_soc);
+        if(errno != EBADF) {
+          fprintf(stderr, "Failed to recv from the socket: error %d: %s\n", errno, strerror(errno));
+          exit(errno);
+        }
+        break;
+    }
+    else if(recv_bytes >= 0) {
+      //printf("recv_bytes inside thread:%d\n", recv_bytes);
+      int send_status = send(sockets->send_soc, buffer, sizeof(buffer), 0); 
+      if(send_status == -1) {
+        close(sockets->listen_soc);
+        close(sockets->send_soc);
+        if(errno != EBADF) {
+          fprintf(stderr, "Failed to send to the socket: error %d: %s\n", errno, strerror(errno));
+          exit(errno);
+        }
+        break;
+      }
+    }
+  }
+}
+
+/*
+ * In thread server mode, when a client is connected,
+ * serve the client
+ */
+void *server_thread(void *serve_info) {
+  ServeInfo *info = (ServeInfo*) serve_info;
+  //int fd = info->client_fd;
+  info->request_handler(info->client_fd);
+  //request_handler(info->client_fd);
+  close(info->client_fd);
+}
+
+/*
  * Serves the contents the file stored at `path` to the client socket `fd`.
  * It is the caller's reponsibility to ensure that the file stored at `path` exists.
  */
@@ -190,155 +378,7 @@ void handle_files_request(int fd) {
   return;
 }
 
-typedef struct TwoWaySocs {
-  int listen_soc;
-  int send_soc;
-  char* dest_host;
-} TwoWaySocs;
 
-void *request_proxy_thread(void *sockets_ptr) {
-  TwoWaySocs *sockets = (TwoWaySocs*) sockets_ptr;
-  int src_fd = sockets->listen_soc;
-  int dest_fd = sockets->send_soc;
-  char* dest_host = sockets->dest_host;
-    
-  int buff_len = 1 << 13;
-  char *coming_buff = (char*) malloc(sizeof(char) * buff_len);
-  char *going_buff = (char*) malloc(sizeof(char) * buff_len);
-  char *going_buff_ptr = going_buff;
-  if(coming_buff == NULL) {
-    fprintf(stderr, "Malloc failed.%d: %s\n", errno, strerror(errno));
-    close(src_fd);
-    close(dest_fd);
-    exit(errno);
-  }
-  if(going_buff == NULL) {
-    fprintf(stderr, "Malloc failed.%d: %s\n", errno, strerror(errno));
-    free(coming_buff);
-    close(src_fd);
-    close(dest_fd);
-    exit(errno);
-  }
-  while(1){
-    int read_bytes = recv(src_fd, coming_buff, buff_len, 0);
-    if(read_bytes > 0 && read_bytes < buff_len)
-    {
-      char *host_start = NULL;
-      if((host_start = strstr(coming_buff, "Host: ")) == NULL) {
-        free(coming_buff);
-        free(going_buff);
-        close(src_fd);
-        close(dest_fd);
-        fprintf(stderr, "'Host' could not found in HTTP..%d %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-      char *host_end = NULL;
-      int snprint_num = -1;
-      if((host_end = strstr(host_start, "\n")) == NULL) {
-        free(coming_buff);
-        free(going_buff);
-        close(src_fd);
-        close(dest_fd);
-        fprintf(stderr, "Host field cannot found in http message. 1024 bytes buffer length might not be enough to hold field line.%d: %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-      
-      snprint_num = snprintf(going_buff_ptr, (host_start - coming_buff + 1), "%s", coming_buff);
-      if(snprint_num  == -1) {
-        free(coming_buff);
-        free(going_buff);
-        close(src_fd);
-        close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-      
-      going_buff_ptr += (host_start - coming_buff);
-      snprint_num = snprintf(going_buff_ptr, strlen(dest_host) + 9, "Host: %s\r\n", dest_host);
-      if(snprint_num  == -1) {
-        free(coming_buff);
-        free(going_buff);
-        close(src_fd);
-        close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-      
-      going_buff_ptr += snprint_num;
-      snprint_num = snprintf(going_buff_ptr, read_bytes - (host_end - host_start + 1), "%s", host_end + 1);
-      if(snprint_num  == -1) {
-        free(coming_buff);
-        free(going_buff);
-        close(src_fd);
-        close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-      if(send(dest_fd, going_buff, strlen(going_buff), 0)  == -1) {
-        free(coming_buff);
-        free(going_buff);
-        close(src_fd);
-        close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed error %d: %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-    }
-    else if(read_bytes == buff_len) {
-      free(coming_buff);
-      free(going_buff);
-      close(src_fd);
-      close(dest_fd);
-      fprintf(stderr, "Buffer overflow reading HTTP request from client. %d: %s\n", errno, strerror(errno));
-      exit(errno);
-    }
-    else {
-      free(coming_buff);
-      free(going_buff);
-      close(src_fd);
-      close(dest_fd);
-      if(errno == 104){
-        fprintf(stderr, "Connection closed by the pair.\n");
-        break;
-      }
-      else {
-        fprintf(stderr, "Read from requested file failed error: %d: %s\n", errno, strerror(errno));
-        exit(errno);
-      }
-    }
-  }
-}
-
-void *response_proxy_thread(void *sockets_ptr){
-  TwoWaySocs *sockets = (TwoWaySocs*) sockets_ptr;
-  
-  char buffer[1 << 17];
-  int recv_bytes = -1;
-  while(1) {
-    recv_bytes = recv(sockets->listen_soc, buffer, sizeof(buffer), 0);
-    if(recv_bytes == -1) {
-        close(sockets->listen_soc);
-        close(sockets->send_soc);
-        if(errno != EBADF) {
-          fprintf(stderr, "Failed to recv from the socket: error %d: %s\n", errno, strerror(errno));
-          exit(errno);
-        }
-        break;
-    }
-    else if(recv_bytes >= 0) {
-      //printf("recv_bytes inside thread:%d\n", recv_bytes);
-      int send_status = send(sockets->send_soc, buffer, sizeof(buffer), 0); 
-      if(send_status == -1) {
-        close(sockets->listen_soc);
-        close(sockets->send_soc);
-        if(errno != EBADF) {
-          fprintf(stderr, "Failed to send to the socket: error %d: %s\n", errno, strerror(errno));
-          exit(errno);
-        }
-        break;
-      }
-    }
-  }
-}
 
 /*
  * Opens a connection to the proxy target (hostname=server_proxy_hostname and
@@ -569,7 +609,17 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      */
 
     /* PART 5 BEGIN */
-
+    int pid = -1;
+    if((pid = fork()) == 0) {
+      request_handler(client_socket_number);
+      close(client_socket_number);
+      exit(EXIT_SUCCESS);
+    }
+    else if(pid == -1) {
+      fprintf(stderr, "Failed to fork a process to serve a client: error %d: %s\n", errno, strerror(errno));
+      close(client_socket_number);
+      exit(errno);
+    }
     /* PART 5 END */
 
 #elif THREADSERVER
@@ -585,7 +635,12 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      */
 
     /* PART 6 BEGIN */
-
+    pthread_t server_thread_id;
+    if(pthread_create(&server_thread_id, NULL, server_thread, &client_socket_number)== -1) {
+      fprintf(stderr, "Cannot create server thread\n");
+      close(client_socket_number);
+      exit(ENXIO);
+    }
     /* PART 6 END */
 #elif POOLSERVER
     /*

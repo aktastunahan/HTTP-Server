@@ -1,8 +1,6 @@
 # HTTP Server
 HTTP server implementation in C.
 ## TODO Tasks
-- Fork Server
-- Thread Server
 - Pool Server
 ## Usage
 - Run server

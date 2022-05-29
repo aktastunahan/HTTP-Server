@@ -46,7 +46,6 @@ typedef struct TwoWaySocs {
 typedef struct ServeInfo {
   int client_fd;
   void (*request_handler)(int);
-  //void (*request_handler)(int) = (void (*)(int))void_request_handler;
 } ServeInfo;
 
 /*****************************************/
@@ -60,6 +59,7 @@ typedef struct ServeInfo {
  */
 
 void *request_proxy_thread(void *sockets_ptr) {
+  pthread_detach(pthread_self());
   TwoWaySocs *sockets = (TwoWaySocs*) sockets_ptr;
   int src_fd = sockets->listen_soc;
   int dest_fd = sockets->send_soc;
@@ -164,11 +164,12 @@ void *request_proxy_thread(void *sockets_ptr) {
         break;
       }
       else {
-        fprintf(stderr, "Read from requested file failed error: %d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Read from requested file with fd:%d failed error: %d: %s\n", src_fd, errno, strerror(errno));
         exit(errno);
       }
     }
   }
+  pthread_exit(NULL);
 }
 
 /*
@@ -176,20 +177,21 @@ void *request_proxy_thread(void *sockets_ptr) {
  * and write it to the requesting client.
  */
 void *response_proxy_thread(void *sockets_ptr){
+  pthread_detach(pthread_self());
   TwoWaySocs *sockets = (TwoWaySocs*) sockets_ptr;
   
   char buffer[1 << 17];
   int recv_bytes = -1;
-  while(1) {
+  //while(1) {
     recv_bytes = recv(sockets->listen_soc, buffer, sizeof(buffer), 0);
     if(recv_bytes == -1) {
         close(sockets->listen_soc);
         close(sockets->send_soc);
-        if(errno != EBADF) {
+        if(errno != 9) {
           fprintf(stderr, "Failed to recv from the socket: error %d: %s\n", errno, strerror(errno));
           exit(errno);
         }
-        break;
+        //break;
     }
     else if(recv_bytes >= 0) {
       //printf("recv_bytes inside thread:%d\n", recv_bytes);
@@ -201,10 +203,11 @@ void *response_proxy_thread(void *sockets_ptr){
           fprintf(stderr, "Failed to send to the socket: error %d: %s\n", errno, strerror(errno));
           exit(errno);
         }
-        break;
+        //break;
       }
     }
-  }
+  //}
+  pthread_exit(NULL);
 }
 
 /*
@@ -212,13 +215,24 @@ void *response_proxy_thread(void *sockets_ptr){
  * serve the client
  */
 void *server_thread(void *serve_info) {
+  pthread_detach(pthread_self());
+  //sleep(2);
   ServeInfo *info = (ServeInfo*) serve_info;
   //int fd = info->client_fd;
   info->request_handler(info->client_fd);
   //request_handler(info->client_fd);
-  close(info->client_fd);
+  pthread_exit(NULL);
 }
-
+/*
+ * In pool thread server mode, when a client is connected,
+ * serve the client
+ */
+/*
+void *poolserver_thread(void *void_request_handler){
+  void (*request_handler)(int) = (void (*)(int))void_request_handler;
+  request_handler(wq_pop(working_queue));
+  pthread_exit(NULL);
+}*/
 /*
  * Serves the contents the file stored at `path` to the client socket `fd`.
  * It is the caller's reponsibility to ensure that the file stored at `path` exists.
@@ -394,7 +408,6 @@ void handle_files_request(int fd) {
  *   Closes client socket (fd) and proxy target fd (target_fd) when finished.
  */
 void handle_proxy_request(int fd) {
-
   /*
   * The code below does a DNS lookup of server_proxy_hostname and
   * opens a connection to it. Please do not modify.
@@ -469,10 +482,8 @@ void handle_proxy_request(int fd) {
     exit(ENXIO);
   }
 
-  
   pthread_join(thread_cltotar_id, NULL);
   pthread_join(thread_tartocl_id, NULL);
-  
   close(fd);
   close(target_fd);
   /* PART 4 END */
@@ -493,7 +504,8 @@ void* handle_clients(void* void_request_handler) {
 
   /* TODO: PART 7 */
   /* PART 7 BEGIN */
-
+  request_handler(wq_pop(&work_queue));
+  pthread_exit(NULL);
   /* PART 7 END */
 }
 
@@ -504,7 +516,15 @@ void init_thread_pool(int num_threads, void (*request_handler)(int)) {
 
   /* TODO: PART 7 */
   /* PART 7 BEGIN */
-
+  wq_init(&work_queue);
+  
+  pthread_t poolserver_thread_id[num_threads];
+  for(int i = 0; i < num_threads; i++) {
+    if(pthread_create(&poolserver_thread_id[i], NULL, handle_clients, request_handler) == -1) {
+      fprintf(stderr, "Cannot create pool server thread\n");
+      exit(ENXIO);
+    }
+  }
   /* PART 7 END */
 }
 #endif
@@ -635,12 +655,16 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      */
 
     /* PART 6 BEGIN */
+    ServeInfo serve_info;
+    serve_info.client_fd = client_socket_number;
+    serve_info.request_handler = request_handler;
     pthread_t server_thread_id;
-    if(pthread_create(&server_thread_id, NULL, server_thread, &client_socket_number)== -1) {
+    if(pthread_create(&server_thread_id, NULL, server_thread, &serve_info) == -1) {
       fprintf(stderr, "Cannot create server thread\n");
       close(client_socket_number);
       exit(ENXIO);
     }
+    //close(client_socket_number);
     /* PART 6 END */
 #elif POOLSERVER
     /*
@@ -652,7 +676,8 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      */
 
     /* PART 7 BEGIN */
-
+    wq_push(&work_queue, client_socket_number);
+   
     /* PART 7 END */
 #endif
   }

@@ -82,9 +82,9 @@ void *request_proxy_thread(void *sockets_ptr) {
     close(dest_fd);
     exit(errno);
   }
-  while(1){
+  //while(1){
     int read_bytes = recv(src_fd, coming_buff, buff_len, 0);
-    if(read_bytes > 0 && read_bytes < buff_len)
+    if(read_bytes >= 0 && read_bytes < buff_len)
     {
       char *host_start = NULL;
       if((host_start = strstr(coming_buff, "Host: ")) == NULL) {
@@ -92,7 +92,7 @@ void *request_proxy_thread(void *sockets_ptr) {
         free(going_buff);
         close(src_fd);
         close(dest_fd);
-        fprintf(stderr, "'Host' could not found in HTTP..%d %s\n", errno, strerror(errno));
+        fprintf(stderr, "'Host' could not found in HTTP.. \n");
         exit(errno);
       }
       char *host_end = NULL;
@@ -102,7 +102,7 @@ void *request_proxy_thread(void *sockets_ptr) {
         free(going_buff);
         close(src_fd);
         close(dest_fd);
-        fprintf(stderr, "Host field cannot found in http message. 1024 bytes buffer length might not be enough to hold field line.%d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Host field cannot found in http message. 1024 bytes buffer length might not be enough to hold field line.\n");
         exit(errno);
       }
       
@@ -112,7 +112,7 @@ void *request_proxy_thread(void *sockets_ptr) {
         free(going_buff);
         close(src_fd);
         close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed1.%d: %s\n", errno, strerror(errno));
         exit(errno);
       }
       
@@ -123,7 +123,7 @@ void *request_proxy_thread(void *sockets_ptr) {
         free(going_buff);
         close(src_fd);
         close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed2.%d: %s\n", errno, strerror(errno));
         exit(errno);
       }
       
@@ -134,7 +134,7 @@ void *request_proxy_thread(void *sockets_ptr) {
         free(going_buff);
         close(src_fd);
         close(dest_fd);
-        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed.%d: %s\n", errno, strerror(errno));
+        fprintf(stderr, "Writing redirected http 'Host' field to the socket failed3.%d: %s\n", errno, strerror(errno));
         exit(errno);
       }
       if(send(dest_fd, going_buff, strlen(going_buff), 0)  == -1) {
@@ -159,16 +159,12 @@ void *request_proxy_thread(void *sockets_ptr) {
       free(going_buff);
       close(src_fd);
       close(dest_fd);
-      if(errno == 104){
-        fprintf(stderr, "Connection closed by the pair.\n");
-        break;
-      }
-      else {
-        fprintf(stderr, "Read from requested file with fd:%d failed error: %d: %s\n", src_fd, errno, strerror(errno));
+      if(errno != 104){
+        fprintf(stderr, "Read from requested file with fd:%d failed error: %d: %s, read_bytes:%d\n", src_fd, errno, strerror(errno), read_bytes);
         exit(errno);
       }
     }
-  }
+  //}
   pthread_exit(NULL);
 }
 
@@ -216,11 +212,9 @@ void *response_proxy_thread(void *sockets_ptr){
  */
 void *server_thread(void *serve_info) {
   pthread_detach(pthread_self());
-  //sleep(2);
   ServeInfo *info = (ServeInfo*) serve_info;
-  //int fd = info->client_fd;
   info->request_handler(info->client_fd);
-  //request_handler(info->client_fd);
+  printf("Client server succesfully!\n");
   pthread_exit(NULL);
 }
 /*
@@ -504,7 +498,10 @@ void* handle_clients(void* void_request_handler) {
 
   /* TODO: PART 7 */
   /* PART 7 BEGIN */
-  request_handler(wq_pop(&work_queue));
+  while(1) {
+    request_handler(wq_pop(&work_queue));
+    printf("Client server succesfully!\n");
+  }
   pthread_exit(NULL);
   /* PART 7 END */
 }
@@ -615,7 +612,7 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
      * the server accept a new connection.
      */
     request_handler(client_socket_number);
-
+    printf("Client server succesfully!\n");
 #elif FORKSERVER
     /*
      * TODO: PART 5
@@ -632,6 +629,7 @@ void serve_forever(int* socket_number, void (*request_handler)(int)) {
     int pid = -1;
     if((pid = fork()) == 0) {
       request_handler(client_socket_number);
+      printf("Client server succesfully!\n");
       close(client_socket_number);
       exit(EXIT_SUCCESS);
     }
